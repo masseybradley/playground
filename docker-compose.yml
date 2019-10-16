@@ -45,8 +45,6 @@ services:
         delay: '10s'
         failure_action: 'pause'
         order: 'stop-first'
-      placement:
-        constraints: ['node.role == manager']
       labels:
       - 'traefik.enable=true'
       - 'traefik.docker.network=traefik'
