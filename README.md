@@ -33,3 +33,8 @@ cd /vagrant
 REGISTRY_HTTP_SECRET=$(openssl rand -base64 32) docker stack deploy --compose-file docker-compose.yml bastion
 ```
 4. test the `openssh-server` connections: `ssh -p 443 ubuntu@localhost`
+5. test the `registry` connections:
+```bash
+docker tag openssh-server:latest docker.localhost/openssh-server:latest
+docker push docker.localhost/openssh-server:latest
+```
