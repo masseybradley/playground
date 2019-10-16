@@ -1,0 +1,123 @@
+version: '3.7'
+services:
+  openssh:
+    restart: 'always'
+    image: 'openssh-server'
+    deploy:
+      replicas: 3
+      restart_policy:
+        condition: 'on-failure'
+        max_attempts: 3
+        delay: '5s'
+        window: '60s'
+      update_config:
+        parallelism: 1
+        delay: '10s'
+        failure_action: 'pause'
+        order: 'start-first'
+      labels:
+      - 'traefik.enable=true'
+      - 'traefik.docker.network=traefik'
+      - 'traefik.docker.lbswarm=true'
+      - 'traefik.tcp.routers.openssh.entrypoints=https'
+      - 'traefik.tcp.routers.openssh.rule=HostSNI("*")'
+      - 'traefik.tcp.routers.openssh.service=openssh'
+      - 'traefik.tcp.services.openssh.loadbalancer.server.port=22'
+    expose:
+    - '22'
+    configs:
+    - source: 'authorized_keys'
+      target: '/home/ubuntu/.ssh/authorized_keys'
+    volumes:
+    - 'openssh:/etc/ssh'
+  registry:
+    restart: 'always'
+    image: 'registry:2'
+    deploy:
+      replicas: 3
+      restart_policy:
+        condition: 'on-failure'
+        max_attempts: 3
+        delay: '5s'
+        window: '60s'
+      update_config:
+        parallelism: 1
+        delay: '10s'
+        failure_action: 'pause'
+        order: 'stop-first'
+      placement:
+        constraints: ['node.role == manager']
+      labels:
+      - 'traefik.enable=true'
+      - 'traefik.docker.network=traefik'
+      - 'traefik.docker.lbswarm=true'
+      - 'traefik.http.routers.registry.entrypoints=http,https'
+      - 'traefik.http.routers.registry.rule=Host("docker.localhost")'
+      - 'traefik.http.routers.registry.service=registry'
+      - 'traefik.http.services.registry.loadbalancer.server.port=5000'
+      - 'traefik.http.middlewares.registry.headers.customrequestheaders.Docker-Distribution-API-Version=registry/2.0'
+    expose:
+    - '5000'
+    environment:
+    - 'REGISTRY_HTTP_SECRET=${REGISTRY_HTTP_SECRET}'
+    volumes:
+    - 'registry:/var/lib/registry'
+  traefik:
+    restart: 'always'
+    image: 'traefik:2.0'
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: 'on-failure'
+        max_attempts: 3
+        delay: '5s'
+        window: '60s'
+      update_config:
+        parallelism: 1
+        delay: '10s'
+        failure_action: 'pause'
+        order: 'stop-first'
+      placement:
+        constraints: ['node.role == manager']
+        preferences:
+        - spread: 'node.id'
+      labels:
+      - 'traefik.enable=false'
+    ports:
+    - '80:80'
+    - '443:443'
+    - '8080:8080'
+    volumes:
+    - '/var/run/docker.sock:/var/run/docker.sock'
+    command:
+    - '--providers.docker.usebindportip=false'
+    - '--providers.docker.exposedbydefault=true'
+    - '--providers.docker.swarmmode=true'
+    - '--providers.docker.swarmmoderefreshseconds=30'
+    - '--providers.docker.watch=true'
+    - '--providers.docker.network=default'
+    - '--entrypoints.http.address=:80'
+    - '--entrypoints.https.address=:443'
+    - '--entrypoints.ssh.address=:22'
+    - '--api.insecure=true'
+    - '--global.sendanonymoususage=false'
+    - '--log.level=DEBUG'
+configs:
+  authorized_keys:
+    file: '${HOME}/.ssh/id_rsa.pub'
+volumes:
+  openssh:
+    driver: 'local'
+    driver_opts:
+      type: 'nfs'
+      o: 'addr=172.28.128.251,rw,nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2'
+      device: ':/openssh'
+  registry:
+    driver: 'local'
+    driver_opts:
+      type: 'nfs'
+      o: 'addr=172.28.128.251,rw,nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2'
+      device: ':/registry'
+networks:
+  default:
+    name: 'traefik'

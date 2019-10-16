@@ -1,0 +1,178 @@
+- hosts: all
+  pre_tasks:
+  - name: set verbose ssh logging
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      regexp: '^#LogLevel INFO'
+      line: 'LogLevel VERBOSE'
+      state: present
+      backup: yes
+      backrefs: yes
+    become: true
+
+  - name: restart sshd
+    service:
+      name: sshd
+      state: restarted
+    become: true
+
+  - name: add ssh server host keys
+    known_hosts:
+      name: github.com
+      key: '{{ lookup("file", "keys/github.com") }}'
+      hash_host: yes
+
+  - name: replace localhost entry with our own
+    lineinfile:
+      path: /etc/hosts
+      regexp: '^127\.0\.0\.1'
+      line: '127.0.0.1 localhost    docker.localhost'
+      owner: root
+      group: root
+      mode: '0644'
+    become: true
+
+  tasks:
+  - name: install build requirements
+    apt:
+      name: ['python3-pip', 'python3-socks', 'git']
+      state: present
+      update_cache: yes
+    become: true
+
+  - name: apt install docker requirements
+    apt:
+      name: ['apt-transport-https', 'ca-certificates', 'curl', 'gnupg-agent', 'software-properties-common']
+      state: present
+    become: true
+
+  - name: add docker apt key
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      state: present
+    become: true
+
+  - name: add docker apt repository
+    apt_repository:
+      repo: 'deb [arch=amd64] https://download.docker.com/linux/ubuntu bionic stable'
+      state: present
+    become: true
+
+  - name: apt install docker-ce
+    apt:
+      name: ['docker-ce', 'docker-ce-cli', 'containerd.io']
+      state: present
+      update_cache: yes
+    become: true
+
+  - name: get docker-compose
+    get_url:
+      url: 'https://github.com/docker/compose/releases/download/1.24.1/docker-compose-{{ ansible_system }}-{{ ansible_userspace_architecture }}'
+      dest: /usr/local/bin/docker-compose
+      mode: '0755'
+    become: true
+
+  - name: pip install docker and boto3
+    pip:
+      name: ['boto3', 'docker', 'docker-compose']
+      executable: pip3
+
+  - name: create docker config directory
+    file:
+      path: /etc/docker
+      state: directory
+    become: true
+
+  - name: copy docker daemon.json
+    copy:
+      content: |
+        {
+            "group": "docker",
+            "log-driver": "journald",
+            "experimental": true,
+            "insecure-registries" : [],
+            "features": { "buildkit": true }
+        }
+      dest: /etc/docker/daemon.json
+    become: true
+
+  - name: enable docker service
+    service:
+      name: docker
+      enabled: yes
+    become: true
+
+  - name: add vagrant user to docker group
+    user:
+      name: vagrant
+      groups: docker
+      append: yes
+    become: true
+
+  - name: reset ssh connection for docker permissions
+    meta: reset_connection
+
+  - name: create swarm master group
+    local_action:
+      module: add_host
+      name: '{{ groups["all"][0] }}'
+      groups: swarm_master
+
+  # --- project specific tasks ---
+  - name: check for existing openssh-server.tar.gz
+    stat:
+      path: /vagrant/openssh-server/openssh-server.tar.gz
+    register: openssh_docker_image
+
+  - name: load openssh-server docker image
+    docker_image:
+      name: openssh-server
+      state: present
+      source: load
+      load_path: '{{ openssh_docker_image.stat.path }}'
+    when: openssh_docker_image.stat.exists
+  # --- project specific tasks ---
+
+- hosts: swarm_master
+  gather_facts: false
+  tasks:
+  - name: initialize swarm master
+    docker_swarm:
+      state: present
+      advertise_addr: '{{ ansible_enp0s8["ipv4"]["address"] }}'
+    register: docker_swarm
+
+  # --- project specific tasks ---
+  - name: start nfs container
+    docker_container:
+      name: nfs
+      image: itsthenetwork/nfs-server-alpine
+      state: started
+      pull: yes
+      restart: yes
+      privileged: yes
+      ports:
+      - '2049:2049'
+      env:
+        SHARED_DIRECTORY: '/nfsshare'
+      volumes:
+      - '/mnt/nfs:/nfsshare'
+
+  - name: create nfs volume structure
+    file:
+      name: '/mnt/nfs/{{ item }}'
+      state: directory
+    loop:
+    - openssh
+    - registry
+    become: true
+  # --- project specific tasks ---
+
+- hosts: all:!swarm_master
+  tasks:
+  - name: join docker swarm
+    docker_swarm:
+      state: join
+      remote_addrs: ['{{ hostvars[groups["swarm_master"][0]]["ansible_enp0s8"]["ipv4"]["address"] }}:2377']
+      join_token: '{{ hostvars[groups["swarm_master"][0]]["docker_swarm"]["swarm_facts"]["JoinTokens"]["Worker"] }}'
+      advertise_addr: '{{ hostvars[inventory_hostname]["ansible_enp0s8"]["ipv4"]["address"] }}:4567'
